@@ -22,10 +22,10 @@ the `Content-Type` output header.
 * **default**: --
 * **context**: http, server, location, location if
     
-If no condition specified, the module will change the `Content-Type` output
-header depending on the extension variable value. I assume the last '.' leading
-part but without a start '/'  in the extension variable value is the extension
-name.
+If a condition variable specified, the module will only change the 
+`Content-Type` output header depending on the extension variable when the
+variable value is `1`. The last '.' leading part but without '/' before the '.'
+in the extension variable value is parsed as the extension name.
 
 * **syntax**: ***types_filter_use_default***  on|off
 * **default**: on
