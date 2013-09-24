@@ -45,6 +45,7 @@ default type of the location.
 ## Status
 
 This module is compatible with following nginx releases:
+- 1.2.6
 - 1.2.7
 
 ## Author
