@@ -109,7 +109,7 @@ static char *
 ngx_http_types_filter(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_types_filter_loc_conf_t  *tlcf = conf;
-    ngx_str_t                         *value, exten, cond;
+    ngx_str_t                         *value, cond;
     ngx_array_t                       *lengths, *values;
     ngx_http_script_compile_t          sc;
 
@@ -223,8 +223,7 @@ ngx_http_set_content_type_exten(ngx_http_request_t *r, ngx_str_t *exten)
     ngx_http_types_filter_loc_conf_t  *tlcf;
     ngx_http_core_loc_conf_t          *clcf;
     ngx_str_t                         *type;
-    ngx_uint_t                         i, hash;
-    u_char                             c;
+    ngx_uint_t                         hash;
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
