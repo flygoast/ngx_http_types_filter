@@ -203,9 +203,11 @@ ngx_http_types_header_filter(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 
-    if ((ngx_http_parse_exten(&val, &exten) != NGX_OK)
-         && !tlcf->use_default)
-    {
+    if (val.len == 0 && !tlcf->use_default) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    if (ngx_http_parse_exten(&val, &exten) != NGX_OK && !tlcf->use_default) {
         return ngx_http_next_header_filter(r);
     }
 
@@ -262,6 +264,13 @@ static ngx_int_t
 ngx_http_parse_exten(ngx_str_t *val, ngx_str_t *exten)
 {
     ngx_int_t  i;
+
+    if (val->len == 0) {
+        exten->len = 0;
+        exten->data = NULL;
+
+        return NGX_DECLINED;
+    }
 
     for (i = val->len - 1; i > 1; i--) {
         if (val->data[i] == '.' && val->data[i - 1] != '/') {
