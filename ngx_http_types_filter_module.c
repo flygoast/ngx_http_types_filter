@@ -40,6 +40,9 @@ typedef struct {
 } ngx_http_types_filter_loc_conf_t;
 
 
+static volatile ngx_cycle_t  *ngx_http_types_filter_prev_cycle;
+
+
 static ngx_int_t ngx_http_types_filter_init(ngx_conf_t *cf);
 static char *ngx_http_types_filter(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
@@ -304,8 +307,23 @@ ngx_http_parse_exten(ngx_str_t *val, ngx_str_t *exten)
 static ngx_int_t
 ngx_http_types_filter_init(ngx_conf_t *cf)
 {
-    ngx_http_next_header_filter = ngx_http_top_header_filter;
-    ngx_http_top_header_filter = ngx_http_types_header_filter;
+    int                                multi_http_blocks;
+    ngx_http_types_filter_loc_conf_t  *conf;
+
+    conf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_types_filter_module);
+
+    if (ngx_http_types_filter_prev_cycle != ngx_cycle) {
+        ngx_http_types_filter_prev_cycle = ngx_cycle;
+        multi_http_blocks = 0;
+
+    } else {
+        multi_http_blocks = 1;
+    }
+
+    if (multi_http_blocks || conf->lengths != NULL) {
+        ngx_http_next_header_filter = ngx_http_top_header_filter;
+        ngx_http_top_header_filter = ngx_http_types_header_filter;
+    }
 
     return NGX_OK;
 }
