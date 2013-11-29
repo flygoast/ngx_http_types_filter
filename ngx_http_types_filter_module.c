@@ -275,7 +275,7 @@ ngx_http_parse_exten(ngx_str_t *val, ngx_str_t *exten)
         return NGX_DECLINED;
     }
 
-    for (i = val->len - 1; i > 1; i--) {
+    for (i = val->len - 1; i > 0; i--) {
         if (val->data[i] == '.' && val->data[i - 1] != '/') {
             exten->len = val->len - i - 1;
             exten->data = &val->data[i + 1];
