@@ -40,12 +40,18 @@ typedef struct {
 } ngx_http_types_filter_loc_conf_t;
 
 
+typedef struct {
+    unsigned    required:1;
+} ngx_http_types_filter_main_conf_t;
+
+
 static volatile ngx_cycle_t  *ngx_http_types_filter_prev_cycle;
 
 
 static ngx_int_t ngx_http_types_filter_init(ngx_conf_t *cf);
 static char *ngx_http_types_filter(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static void *ngx_http_types_filter_create_main_conf(ngx_conf_t *cf);
 static void *ngx_http_types_filter_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_types_filter_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child);
@@ -81,7 +87,7 @@ static ngx_http_module_t  ngx_http_types_filter_module_ctx = {
     NULL,                                   /* preconfiguration */
     ngx_http_types_filter_init,             /* postconfiguration */
 
-    NULL,                                   /* create main configuration */
+    ngx_http_types_filter_create_main_conf, /* create main configuration */
     NULL,                                   /* init main configuration */
 
     NULL,                                   /* create server configuration */
@@ -111,10 +117,11 @@ ngx_module_t  ngx_http_types_filter_module = {
 static char *
 ngx_http_types_filter(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_types_filter_loc_conf_t  *tlcf = conf;
-    ngx_str_t                         *value, cond;
-    ngx_array_t                       *lengths, *values;
-    ngx_http_script_compile_t          sc;
+    ngx_http_types_filter_loc_conf_t   *tlcf = conf;
+    ngx_http_types_filter_main_conf_t  *tmcf;
+    ngx_str_t                          *value, cond;
+    ngx_array_t                        *lengths, *values;
+    ngx_http_script_compile_t           sc;
 
     if (tlcf->lengths != NGX_CONF_UNSET_PTR) {
         return "is duplicate";
@@ -156,6 +163,9 @@ ngx_http_types_filter(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             return NGX_CONF_ERROR;
         }
     }
+
+    tmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_types_filter_module);
+    tmcf->required = 1;
 
     return NGX_CONF_OK;
 }
@@ -307,10 +317,10 @@ ngx_http_parse_exten(ngx_str_t *val, ngx_str_t *exten)
 static ngx_int_t
 ngx_http_types_filter_init(ngx_conf_t *cf)
 {
-    int                                multi_http_blocks;
-    ngx_http_types_filter_loc_conf_t  *conf;
+    int                                 multi_http_blocks;
+    ngx_http_types_filter_main_conf_t  *tmcf;
 
-    conf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_types_filter_module);
+    tmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_types_filter_module);
 
     if (ngx_http_types_filter_prev_cycle != ngx_cycle) {
         ngx_http_types_filter_prev_cycle = ngx_cycle;
@@ -320,12 +330,31 @@ ngx_http_types_filter_init(ngx_conf_t *cf)
         multi_http_blocks = 1;
     }
 
-    if (multi_http_blocks || conf->lengths != NULL) {
+    if (multi_http_blocks || tmcf->required) {
         ngx_http_next_header_filter = ngx_http_top_header_filter;
         ngx_http_top_header_filter = ngx_http_types_header_filter;
     }
 
     return NGX_OK;
+}
+
+
+static void *
+ngx_http_types_filter_create_main_conf(ngx_conf_t *cf)
+{
+    ngx_http_types_filter_main_conf_t  *tmcf;
+
+    tmcf = ngx_pcalloc(cf->pool, sizeof(ngx_http_types_filter_main_conf_t));
+    if (tmcf == NULL) {
+        return NULL;
+    }
+
+    /*
+     * set by ngx_pcalloc():
+     *     tmcf->required = 0;
+     */
+
+    return tmcf;
 }
 
 
