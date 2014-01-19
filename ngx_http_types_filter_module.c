@@ -33,10 +33,16 @@
 
 
 typedef struct {
-    ngx_int_t     index;
-    ngx_flag_t    use_default;
-    ngx_array_t  *values;
+    ngx_array_t  *codes;
     ngx_array_t  *lengths;
+    ngx_array_t  *values;
+    ngx_str_t     type;
+} ngx_http_types_filter_condition_t;
+
+
+typedef struct {
+    ngx_flag_t    use_default;
+    ngx_array_t  *conditions;   /* ngx_http_types_filter_condition_t */
 } ngx_http_types_filter_loc_conf_t;
 
 
@@ -48,32 +54,34 @@ typedef struct {
 static volatile ngx_cycle_t  *ngx_http_types_filter_prev_cycle;
 
 
-static ngx_int_t ngx_http_types_filter_init(ngx_conf_t *cf);
 static char *ngx_http_types_filter(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
-static void *ngx_http_types_filter_create_main_conf(ngx_conf_t *cf);
-static void *ngx_http_types_filter_create_loc_conf(ngx_conf_t *cf);
-static char *ngx_http_types_filter_merge_loc_conf(ngx_conf_t *cf, void *parent,
-    void *child);
+static char *ngx_http_types_filter_condition_value(ngx_conf_t *cf,
+    ngx_http_types_filter_condition_t *condition, ngx_str_t *value);
+static char *ngx_http_types_filter_condition(ngx_conf_t *cf,
+    ngx_http_types_filter_condition_t *condition, ngx_uint_t offset);
+static ngx_int_t ngx_http_types_filter_init(ngx_conf_t *cf);
 static ngx_int_t ngx_http_set_content_type_exten(ngx_http_request_t *r,
     ngx_str_t *exten);
 static ngx_int_t ngx_http_parse_exten(ngx_str_t *val, ngx_str_t *exten);
 static ngx_int_t ngx_http_types_header_filter(ngx_http_request_t *r);
+static void *ngx_http_types_filter_create_main_conf(ngx_conf_t *cf);
+static void *ngx_http_types_filter_create_loc_conf(ngx_conf_t *cf);
+static char *ngx_http_types_filter_merge_loc_conf(ngx_conf_t *cf, void *parent,
+    void *child);
 
 
 static ngx_command_t  ngx_http_types_filter_commands[] = {
 
     { ngx_string("types_filter"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF
-                        |NGX_CONF_TAKE12,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
       ngx_http_types_filter,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       NULL },
 
     { ngx_string("types_filter_use_default"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF
-                        |NGX_CONF_FLAG,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
       ngx_conf_set_flag_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_types_filter_loc_conf_t, use_default),
@@ -100,16 +108,16 @@ static ngx_http_module_t  ngx_http_types_filter_module_ctx = {
 
 ngx_module_t  ngx_http_types_filter_module = {
     NGX_MODULE_V1,
-    &ngx_http_types_filter_module_ctx,     /* module context */
-    ngx_http_types_filter_commands,        /* module directives */
-    NGX_HTTP_MODULE,                       /* module type */
-    NULL,                                  /* init master */
-    NULL,                                  /* init module */
-    NULL,                                  /* init process */
-    NULL,                                  /* init thread */
-    NULL,                                  /* exit thread */
-    NULL,                                  /* exit process */
-    NULL,                                  /* exit master */
+    &ngx_http_types_filter_module_ctx,      /* module context */
+    ngx_http_types_filter_commands,         /* module directives */
+    NGX_HTTP_MODULE,                        /* module type */
+    NULL,                                   /* init master */
+    NULL,                                   /* init module */
+    NULL,                                   /* init process */
+    NULL,                                   /* init thread */
+    NULL,                                   /* exit thread */
+    NULL,                                   /* exit process */
+    NULL,                                   /* exit master */
     NGX_MODULE_V1_PADDING
 };
 
@@ -117,51 +125,68 @@ ngx_module_t  ngx_http_types_filter_module = {
 static char *
 ngx_http_types_filter(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_types_filter_loc_conf_t   *tlcf = conf;
-    ngx_http_types_filter_main_conf_t  *tmcf;
-    ngx_str_t                          *value, cond;
-    ngx_array_t                        *lengths, *values;
+    ngx_str_t                          *value;
+    ngx_uint_t                          n;
     ngx_http_script_compile_t           sc;
+    ngx_http_types_filter_condition_t  *condition;
+    ngx_http_types_filter_main_conf_t  *tmcf;
+    ngx_http_types_filter_loc_conf_t   *tlcf = conf;
 
-    if (tlcf->lengths != NGX_CONF_UNSET_PTR) {
-        return "is duplicate";
+    if (tlcf->conditions == NULL) {
+        tlcf->conditions = ngx_array_create(cf->pool, 4,
+                                     sizeof(ngx_http_types_filter_condition_t));
+        if (tlcf->conditions == NULL) {
+            return NGX_CONF_ERROR;
+        }
     }
 
-    ngx_memzero(&sc, sizeof(ngx_http_script_compile_t));
-
-    lengths = NULL;
-    values = NULL;
-
-    value = cf->args->elts;
-
-    sc.cf = cf;
-    sc.source = &value[1];
-    sc.lengths = &lengths;
-    sc.values = &values;
-    sc.complete_lengths = 1;
-    sc.complete_values = 1;
-
-    if (ngx_http_script_compile(&sc) != NGX_OK) {
+    condition = ngx_array_push(tlcf->conditions);
+    if (condition == NULL) {
         return NGX_CONF_ERROR;
     }
 
-    tlcf->lengths = lengths->elts;
-    tlcf->values = values->elts;
+    ngx_memzero(condition, sizeof(ngx_http_types_filter_condition_t));
 
-    if (cf->args->nelts == 3) {
-        cond = value[2];
+    value = cf->args->elts;
+    condition->type = value[1];
 
-        if (cond.data[0] != '$') {
-            return "invalid condition variable";
-        }
+    n = ngx_http_script_variables_count(&condition->type);
 
-        cond.len--;
-        cond.data++;
+    if (n) {
+        ngx_memzero(&sc, sizeof(ngx_http_script_compile_t));
 
-        tlcf->index = ngx_http_get_variable_index(cf, &cond);
-        if (tlcf->index == NGX_ERROR) {
+        sc.cf = cf;
+        sc.source = &condition->type;
+        sc.lengths = &condition->lengths;
+        sc.values = &condition->values;
+        sc.variables = n;
+        sc.complete_lengths = 1;
+        sc.complete_values = 1;
+
+        if (ngx_http_script_compile(&sc) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
+    }
+
+    if (cf->args->nelts == 2) {
+        return NGX_CONF_OK;
+    }
+
+    if (ngx_strcmp(value[2].data, "if") != 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                         "incorrect token \"%V\" in directive \"types_filter\"",
+                         &value[2]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (cf->args->nelts == 3) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid syntax in directive \"types_filter\"");
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_http_types_filter_condition(cf, condition, 2) != NGX_CONF_OK) {
+        return NGX_CONF_ERROR;
     }
 
     tmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_types_filter_module);
@@ -177,9 +202,13 @@ static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 static ngx_int_t
 ngx_http_types_header_filter(ngx_http_request_t *r)
 {
-    ngx_http_types_filter_loc_conf_t  *tlcf;
-    ngx_http_variable_value_t         *vv;
-    ngx_str_t                          val, exten;
+    ngx_uint_t                          i;
+    ngx_str_t                           type, exten;
+    ngx_http_script_engine_t            e;
+    ngx_http_script_code_pt             code;
+    ngx_http_variable_value_t           stack[10];
+    ngx_http_types_filter_loc_conf_t   *tlcf;
+    ngx_http_types_filter_condition_t  *conditions;
 
     if (r != r->main
         || (r->headers_out.status != NGX_HTTP_OK
@@ -196,31 +225,55 @@ ngx_http_types_header_filter(ngx_http_request_t *r)
     }
 
     tlcf = ngx_http_get_module_loc_conf(r, ngx_http_types_filter_module);
+    conditions = tlcf->conditions->elts;
+    for (i = 0; i < tlcf->conditions->nelts; i++) {
+        if (conditions[i].codes == NULL) {
+            break;
+        }
+    
+        ngx_memzero(&e, sizeof(ngx_http_script_engine_t));
+        ngx_memzero(&stack, sizeof(stack));
 
-    if (tlcf->lengths == NULL) {
+        e.sp = stack;
+        e.ip = conditions[i].codes->elts;
+        e.request = r;
+        e.quote = 1;
+        e.log = 1;
+        e.status = NGX_DECLINED;
+
+        while (*(uintptr_t *) e.ip) {
+            code = *(ngx_http_script_code_pt *) e.ip;
+            code(&e);
+        }
+
+        e.sp--;
+
+        if (e.sp->len && (e.sp->len != 1 || e.sp->data[0] != '0')) {
+            break;
+        }
+    }
+
+    if (i == tlcf->conditions->nelts) {
         return ngx_http_next_header_filter(r);
     }
 
-    if (tlcf->index != -1) {
-        vv = ngx_http_get_flushed_variable(r, tlcf->index);
-        if (vv == NULL || vv->not_found) {
-            return ngx_http_next_header_filter(r);
+    if (conditions[i].lengths) {
+        if (ngx_http_script_run(r, &type, conditions[i].lengths->elts, 0, 
+                                conditions[i].values->elts)
+            == NULL)
+        {
+            return NGX_ERROR;
         }
 
-        if (vv->len != 1 || vv->data[0] != '1') {
-            return ngx_http_next_header_filter(r);
-        }
+    } else {
+        type = conditions[i].type;
     }
 
-    if (ngx_http_script_run(r, &val, tlcf->lengths, 0, tlcf->values) == NULL) {
-        return NGX_ERROR;
-    }
-
-    if (val.len == 0 && !tlcf->use_default) {
+    if (type.len == 0 && !tlcf->use_default) {
         return ngx_http_next_header_filter(r);
     }
 
-    if (ngx_http_parse_exten(&val, &exten) != NGX_OK && !tlcf->use_default) {
+    if (ngx_http_parse_exten(&type, &exten) != NGX_OK && !tlcf->use_default) {
         return ngx_http_next_header_filter(r);
     }
 
@@ -339,6 +392,297 @@ ngx_http_types_filter_init(ngx_conf_t *cf)
 }
 
 
+static char *
+ngx_http_types_filter_condition(ngx_conf_t *cf,
+    ngx_http_types_filter_condition_t *condition, ngx_uint_t offset)
+{
+    u_char                        *p;
+    size_t                         len;
+    ngx_str_t                     *value;
+    ngx_uint_t                     cur, last;
+    ngx_regex_compile_t            rc;
+    ngx_http_script_code_pt       *code;
+    ngx_http_script_file_code_t   *fop;
+    ngx_http_script_regex_code_t  *regex;
+    u_char                         errstr[NGX_MAX_CONF_ERRSTR];
+
+    value = cf->args->elts;
+    last = cf->args->nelts - 1;
+
+    value += offset;
+    last -= offset;
+
+    if (value[1].len < 1 || value[1].data[0] != '(') {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid condition \"%V\"", &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (value[1].len == 1) {
+        cur = 2;
+
+    } else {
+        cur = 1;
+        value[1].len--;
+        value[1].data++;
+    }
+
+    if (value[last].len < 1 || value[last].data[value[last].len - 1] != ')') {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid condition \"%V\"", &value[last]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (value[last].len == 1) {
+        last--;
+
+    } else {
+        value[last].len--;
+        value[last].data[value[last].len] = '\0';
+    }
+
+    len = value[cur].len;
+    p = value[cur].data;
+
+    if (len > 1 && p[0] == '$') {
+
+        if (cur != last && cur + 2 != last) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "invalid condition \"%V\"", &value[cur]);
+            return NGX_CONF_ERROR;
+        }
+
+        if (ngx_http_types_filter_condition_value(cf, condition, &value[cur])
+            != NGX_CONF_OK)
+        {
+            return NGX_CONF_ERROR;
+        }
+
+        if (cur == last) {
+            return NGX_CONF_OK;
+        }
+
+        cur++;
+
+        len = value[cur].len;
+        p = value[cur].data;
+
+        if (len == 1 && p[0] == '=') {
+            if (ngx_http_types_filter_condition_value(cf, condition,
+                                                      &value[last])
+                != NGX_CONF_OK)
+            {
+                return NGX_CONF_ERROR;
+            }
+
+            code = ngx_http_script_start_code(cf->pool, &condition->codes,
+                                              sizeof(uintptr_t));
+            if (code == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            *code = ngx_http_script_equal_code;
+
+            return NGX_CONF_OK;
+        }
+
+        if (len == 2 && p[0] == '!' && p[1] == '=') {
+
+            if (ngx_http_types_filter_condition_value(cf, condition,
+                                                      &value[last])
+                != NGX_CONF_OK)
+            {
+                return NGX_CONF_ERROR;
+            }
+
+            code = ngx_http_script_start_code(cf->pool, &condition->codes,
+                                              sizeof(uintptr_t));
+            if (code == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            *code = ngx_http_script_not_equal_code;
+            return NGX_CONF_OK;
+        }
+
+        if ((len == 1 && p[0] == '~')
+            || (len == 2 && p[0] == '~' && p[1] == '*')
+            || (len == 2 && p[0] == '!' && p[1] == '~')
+            || (len == 3 && p[0] == '!' && p[1] == '~' && p[2] == '*'))
+        {
+            regex = ngx_http_script_start_code(cf->pool, &condition->codes,
+                                          sizeof(ngx_http_script_regex_code_t));
+            if (regex == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            ngx_memzero(regex, sizeof(ngx_http_script_regex_code_t));
+            
+            ngx_memzero(&rc, sizeof(ngx_regex_compile_t));
+
+            rc.pattern = value[last];
+            rc.options = (p[len - 1] == '*') ? NGX_REGEX_CASELESS : 0;
+            rc.err.len = NGX_MAX_CONF_ERRSTR;
+            rc.err.data = errstr;
+
+            regex->regex = ngx_http_regex_compile(cf, &rc);
+            if (regex->regex == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            regex->code = ngx_http_script_regex_start_code;
+            regex->next = sizeof(ngx_http_script_regex_code_t);
+            regex->test = 1;
+            if (p[0] == '!') {
+                regex->negative_test = 1;
+            }
+            regex->name = value[last];
+
+            return NGX_CONF_OK;
+        }
+
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "unexpected \"%V\" in condition", &value[cur]);
+        return NGX_CONF_ERROR;
+
+    } else if ((len == 2 && p[0] == '-')
+               || (len == 3 && p[0] == '!' && p[1] == '-'))
+    {
+        if (cur + 1 != last) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "invalid condition \"%V\"", &value[cur]);
+            return NGX_CONF_ERROR;
+        }
+
+        value[last].data[value[last].len] = '\0';
+        value[last].len++;
+
+        if (ngx_http_types_filter_condition_value(cf, condition, &value[last])
+            != NGX_CONF_OK)
+        {
+            return NGX_CONF_ERROR;
+        }
+
+        fop = ngx_http_script_start_code(cf->pool, &condition->codes,
+                                         sizeof(ngx_http_script_file_code_t));
+        if (fop == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        fop->code = ngx_http_script_file_code;
+
+        if (p[1] == 'f') {
+            fop->op = ngx_http_script_file_plain;
+            return NGX_CONF_OK;
+        }
+
+        if (p[1] == 'd') {
+            fop->op = ngx_http_script_file_dir;
+            return NGX_CONF_OK;
+        }
+
+        if (p[1] == 'e') {
+            fop->op = ngx_http_script_file_exists;
+            return NGX_CONF_OK;
+        }
+
+        if (p[1] == 'x') {
+            fop->op = ngx_http_script_file_exec;
+            return NGX_CONF_OK;
+        }
+
+        if (p[0] == '!') {
+            if (p[2] == 'f') {
+                fop->op = ngx_http_script_file_not_plain;
+                return NGX_CONF_OK;
+            }
+
+            if (p[2] == 'd') {
+                fop->op = ngx_http_script_file_not_dir;
+                return NGX_CONF_OK;
+            }
+
+            if (p[2] == 'e') {
+                fop->op = ngx_http_script_file_not_exists;
+                return NGX_CONF_OK;
+            }
+
+            if (p[2] == 'x') {
+                fop->op = ngx_http_script_file_not_exec;
+                return NGX_CONF_OK;
+            }
+        }
+
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid condition \"%V\"", &value[cur]);
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                       "invalid condition \"%V\"", &value[cur]);
+
+    return NGX_CONF_ERROR;
+}
+
+
+static char *
+ngx_http_types_filter_condition_value(ngx_conf_t *cf,
+    ngx_http_types_filter_condition_t *condition, ngx_str_t *value)
+{
+    ngx_int_t                              n;
+    ngx_http_script_compile_t              sc;
+    ngx_http_script_value_code_t          *val;
+    ngx_http_script_complex_value_code_t  *complex;
+
+    n = ngx_http_script_variables_count(value);
+
+    if (n == 0) {
+        val = ngx_http_script_start_code(cf->pool, &condition->codes,
+                                         sizeof(ngx_http_script_value_code_t));
+        if (val == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        n = ngx_atoi(value->data, value->len);
+
+        if (n == NGX_ERROR) {
+            n = 0;
+        }
+
+        val->code = ngx_http_script_value_code;
+        val->value = (uintptr_t) n;
+        val->text_len = (uintptr_t) value->len;
+        val->text_data = (uintptr_t) value->data;
+
+        return NGX_CONF_OK;
+    }
+
+    complex = ngx_http_script_start_code(cf->pool, &condition->codes,
+                                  sizeof(ngx_http_script_complex_value_code_t));
+    if (complex == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    complex->code = ngx_http_script_complex_value_code;
+    complex->lengths = NULL;
+
+    ngx_memzero(&sc, sizeof(ngx_http_script_compile_t));
+
+    sc.cf = cf;
+    sc.source = value;
+    sc.lengths = &complex->lengths;
+    sc.values = &condition->codes;
+    sc.variables = n;
+    sc.complete_lengths = 1;
+
+    if (ngx_http_script_compile(&sc) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
+
 static void *
 ngx_http_types_filter_create_main_conf(ngx_conf_t *cf)
 {
@@ -368,10 +712,7 @@ ngx_http_types_filter_create_loc_conf(ngx_conf_t *cf)
         return NULL;
     }
 
-    conf->index = NGX_CONF_UNSET;
     conf->use_default = NGX_CONF_UNSET;
-    conf->values = NGX_CONF_UNSET_PTR;
-    conf->lengths = NGX_CONF_UNSET_PTR;
     
     return conf;
 }
@@ -384,10 +725,11 @@ ngx_http_types_filter_merge_loc_conf(ngx_conf_t *cf, void *parent,
     ngx_http_types_filter_loc_conf_t  *prev = parent;
     ngx_http_types_filter_loc_conf_t  *conf = child;
 
-    ngx_conf_merge_value(conf->index, prev->index, -1);
     ngx_conf_merge_value(conf->use_default, prev->use_default, 1);
-    ngx_conf_merge_ptr_value(conf->values, prev->values, NULL);
-    ngx_conf_merge_ptr_value(conf->lengths, prev->lengths, NULL);
+
+    if (conf->conditions == NULL && prev->conditions) {
+        conf->conditions = prev->conditions;
+    }
 
     return NGX_CONF_OK;
 }
